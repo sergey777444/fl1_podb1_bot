@@ -71,7 +71,7 @@ def week_type(d: date) -> str:
 
 
 def pairs_on(d: date) -> list:
-    if d.isoweekday() > 5:
+    if d.isoweekday() > 6:
         return []
     return DATA["schedule"][week_type(d)].get(str(d.isoweekday()), [])
 
@@ -81,16 +81,26 @@ def head(d: date, icon: str, label: str) -> str:
     return f"{icon} <b>{label}</b> · {WEEKDAYS[d.weekday()]}, {d.day} {MONTHS[d.month - 1]}\n{wt} неделя"
 
 
+def room_line(room: str, lec) -> str:
+    parts = []
+    if room:
+        parts.append(("💻 " if room.lower().startswith("онлайн") else "🚪 ") + html.escape(room))
+    if lec:
+        parts.append("📚 лекция")
+    return " · ".join(parts)
+
+
 def day_text(d: date, label: str) -> str:
     pairs = pairs_on(d)
     text = head(d, "📅", label)
     if not pairs:
         return text + "\n\nПар нет 🎉"
     lines = []
-    for num, title, *lec in pairs:
+    for num, title, room, *lec in pairs:
         s, e = DATA["calls"][str(num)]
-        lines.append(f"{num}) {s}–{e} · {html.escape(title)}" + (" 📚 лекция" if lec else ""))
-    return text + "\n\n" + "\n".join(lines)
+        extra = room_line(room, lec)
+        lines.append(f"{num}) {s}–{e} · {html.escape(title)}" + ("\n" + extra if extra else ""))
+    return text + "\n\n" + "\n\n".join(lines)
 
 
 @dp.message(Command("start", "help"))
@@ -428,17 +438,19 @@ async def tick(now: datetime):
             if st.get("morning"):
                 await safe_send(cid, text)
 
-    for i, (num, title, *lec) in enumerate(pairs):
+    for i, (num, title, room, *lec) in enumerate(pairs):
         s, e = DATA["calls"][str(num)]
         name = html.escape(title) + (" 📚" if lec else "")
+        where = "\n" + room_line(room, []) if room else ""
         if hhmm == s:
-            msg = f"🔔 Началась {num}-я пара: <b>{name}</b>\nДо {e}"
+            msg = f"🔔 Началась {num}-я пара: <b>{name}</b>{where}\nДо {e}"
         elif hhmm == e:
             if i + 1 < len(pairs):
-                n_num, n_title, *_ = pairs[i + 1]
+                n_num, n_title, n_room, *_ = pairs[i + 1]
                 n_start = DATA["calls"][str(n_num)][0]
+                n_where = " · " + room_line(n_room, []) if n_room else ""
                 msg = (f"✅ Закончилась {num}-я пара: {name}\n"
-                       f"Дальше: {n_num}-я в {n_start} · <b>{html.escape(n_title)}</b>")
+                       f"Дальше: {n_num}-я в {n_start} · <b>{html.escape(n_title)}</b>{n_where}")
             else:
                 msg = f"✅ Закончилась {num}-я пара: {name}\nНа сегодня всё 🎉"
         else:
