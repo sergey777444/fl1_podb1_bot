@@ -35,6 +35,25 @@ WEEKDAYS = ["понедельник", "вторник", "среда", "четв�
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
           "сентября", "октября", "ноября", "декабря"]
 
+# ---------- дни рождения ----------
+BIRTHDAYS = [  # (день, месяц, имя)
+    (1, 1, "Алина Шакирова"),
+    (24, 1, "Алёна Боровикова"),
+    (7, 3, "Влад и ещё один именинник"),  # поправь имя
+    (12, 5, "Алина Карелина"),
+    (11, 7, "Арина Анохина"),
+    (4, 8, "Серёжа"),
+    (13, 8, "Софа"),
+    (9, 9, "Алёна Истомина"),
+    (10, 9, "Сабина"),
+    (12, 11, "Влада"),
+    (5, 12, "Саша"),
+    (18, 12, "Арина Арахланова"),
+]
+BD_AMOUNT = 200
+# реквизиты лучше держать в переменной Railway, а не в публичном репозитории
+PAY_INFO = os.environ.get("PAY_INFO", "Алёна Боровикова, Райффайзен")
+
 bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True))
 dp = Dispatcher()
 
@@ -113,6 +132,8 @@ async def cmd_start(m: Message):
         "/subject — предметы и преподаватели\n"
         "/hw — ДЗ (например /hw 15.11 на дату)\n"
         "/addhw — добавить ДЗ\n"
+        "/bd — дни рождения\n"
+        "/bday on|off — напоминания о днях рождения\n"
         "/notify on|off — уведомления о начале и конце пар\n"
         "/morning on|off — утренняя рассылка с парами"
     )
@@ -416,6 +437,60 @@ async def cmd_morning(m: Message, command: CommandObject):
     await toggle(m, command, "morning", "☀️ Утренняя рассылка")
 
 
+# ---------- дни рождения: команды ----------
+def upcoming_bd(today: date) -> list:
+    res = []
+    for day, month, name in BIRTHDAYS:
+        dt = date(today.year, month, day)
+        if dt < today:
+            dt = date(today.year + 1, month, day)
+        res.append((dt, name))
+    return sorted(res)
+
+
+def left_text(n: int) -> str:
+    return "сегодня 🎂" if n == 0 else "завтра" if n == 1 else f"через {n} дн."
+
+
+def pay_text() -> str:
+    return (f"💸 Скидываемся по {BD_AMOUNT} ₽ с каждого\n"
+            f"Переводим: {html.escape(PAY_INFO)}")
+
+
+@dp.message(Command("bd", "birthdays"))
+async def cmd_bd(m: Message):
+    today = datetime.now(TZ).date()
+    lines = []
+    for i, (dt, name) in enumerate(upcoming_bd(today)):
+        mark = " ⬅️" if i == 0 else ""
+        lines.append(f"{dt.day} {MONTHS[dt.month - 1]} — {html.escape(name)}"
+                     f" ({left_text((dt - today).days)}){mark}")
+    await m.answer("🎂 <b>Дни рождения</b>\n\n" + "\n".join(lines)
+                   + "\n\n⬅️ — ближайший\n\n" + pay_text()
+                   + "\n\n🔔 Напоминания: /bday on")
+
+
+@dp.message(Command("bday"))
+async def cmd_bday(m: Message, command: CommandObject):
+    await toggle(m, command, "bday", "🎂 Напоминания о днях рождения")
+
+
+async def send_bday_reminders(d: date, chats: dict):
+    """В сам день — поздравить, за день до — напомнить про сбор денег. Обходит всех, не только ближайшего."""
+    for dt, name in upcoming_bd(d):
+        n = (dt - d).days
+        if n == 0:
+            text = f"🎉 Сегодня день рождения: <b>{html.escape(name)}</b>!\nНе забудь поздравить 🥳"
+        elif n == 1:
+            text = (f"🎂 Завтра ({dt.day} {MONTHS[dt.month - 1]}) день рождения: "
+                    f"<b>{html.escape(name)}</b>\n\n" + pay_text())
+        else:
+            continue
+        for cid, st in chats.items():
+            if st.get("bday"):
+                await safe_send(cid, text)
+
+
 # ---------- планировщик ----------
 async def safe_send(chat_id, text: str):
     try:
@@ -426,11 +501,15 @@ async def safe_send(chat_id, text: str):
 
 async def tick(now: datetime):
     d = now.date()
+    hhmm = now.strftime("%H:%M")
+    chats = load_settings()
+
+    if hhmm == MORNING_TIME:
+        await send_bday_reminders(d, chats)  # работает и в дни без пар
+
     pairs = pairs_on(d)
     if not pairs:
         return
-    hhmm = now.strftime("%H:%M")
-    chats = load_settings()
 
     if hhmm == MORNING_TIME:
         text = "☀️ Доброе утро!\n\n" + day_text(d, "Сегодня")
@@ -478,6 +557,8 @@ async def main():
         BotCommand(command="subject", description="Предметы и преподаватели"),
         BotCommand(command="hw", description="Домашние задания"),
         BotCommand(command="addhw", description="Добавить ДЗ"),
+        BotCommand(command="bd", description="Дни рождения"),
+        BotCommand(command="bday", description="Напоминания о ДР вкл/выкл"),
         BotCommand(command="notify", description="Уведомления о парах вкл/выкл"),
         BotCommand(command="morning", description="Утренняя рассылка вкл/выкл"),
     ])
