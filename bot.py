@@ -11,6 +11,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BotCommand, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -100,6 +102,7 @@ async def cmd_start(m: Message):
         "/calls — звонки\n"
         "/subject — предметы и преподаватели\n"
         "/hw — ДЗ (например /hw 15.11 на дату)\n"
+        "/addhw — добавить ДЗ\n"
         "/notify on|off — уведомления о начале и конце пар\n"
         "/morning on|off — утренняя рассылка с парами"
     )
@@ -208,7 +211,7 @@ async def cmd_hw(m: Message, command: CommandObject):
         await m.answer(head(d, "📝", "ДЗ на") + "\n\nПар нет 🎉")
         return
     try:
-        hw = await fetch_hw()
+        hw = await get_hw()
     except Exception as e:
         print("hw error:", e)
         await m.answer("Не получилось загрузить ДЗ 😭 Попробуй чуть позже")
@@ -222,6 +225,144 @@ async def cmd_hw(m: Message, command: CommandObject):
         text = hw.get(f"{d.isoformat()}_{title}")
         lines.append(f"<b>{html.escape(title)}</b>\n{html.escape(str(text)) if text else '— нет задания'}")
     await m.answer(head(d, "📝", "ДЗ на") + "\n\n" + "\n\n".join(lines))
+
+
+# ---------- добавление ДЗ (может любой) ----------
+WEEKDAYS_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+LOCAL_HW_FILE = os.path.join(DATA_DIR, "hw_local.json")
+
+
+class AddHW(StatesGroup):
+    text = State()
+
+
+def load_local_hw() -> dict:
+    try:
+        with open(LOCAL_HW_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_local_hw(data: dict) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(LOCAL_HW_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+
+async def get_hw() -> dict:
+    """Общая база ДЗ + то, что бот сохранил у себя, если база была недоступна."""
+    local = load_local_hw()
+    try:
+        hw = await fetch_hw()
+    except Exception as e:
+        print("hw fetch error:", e)
+        if not local:
+            raise
+        hw = {}
+    for k, v in local.items():
+        hw[k] = f"{hw[k]}\n{v}" if hw.get(k) else v
+    return hw
+
+
+async def save_hw(key: str, text: str) -> bool:
+    """True — сохранено в общую базу, False — только в самом боте."""
+    try:
+        data = await fetch_hw()
+        old = data.get(key)
+        data[key] = f"{old}\n{text}" if old else text
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(HW_URL, json=data) as r:
+                r.raise_for_status()
+        return True
+    except Exception as e:
+        print("hw save error:", e)
+        local = load_local_hw()
+        old = local.get(key)
+        local[key] = f"{old}\n{text}" if old else text
+        save_local_hw(local)
+        return False
+
+
+def study_days(n: int = 6) -> list:
+    today = datetime.now(TZ).date()
+    days = []
+    for i in range(21):
+        d = today + timedelta(days=i)
+        if pairs_on(d):
+            days.append(d)
+        if len(days) == n:
+            break
+    return days
+
+
+def unique_titles(d: date) -> list:
+    titles = []
+    for _, title, *_ in pairs_on(d):
+        if title not in titles:
+            titles.append(title)
+    return titles
+
+
+@dp.message(Command("addhw"))
+async def cmd_addhw(m: Message, state: FSMContext):
+    await state.clear()
+    b = InlineKeyboardBuilder()
+    for d in study_days():
+        b.button(text=f"{WEEKDAYS_SHORT[d.weekday()]} {d.strftime('%d.%m')}", callback_data=f"ad:{d.isoformat()}")
+    b.adjust(3)
+    await m.answer("📝 К какому занятию добавляем ДЗ? Выбери дату 👇", reply_markup=b.as_markup())
+
+
+@dp.callback_query(F.data.startswith("ad:"))
+async def cb_hw_date(c: CallbackQuery):
+    try:
+        d = date.fromisoformat(c.data[3:])
+        b = InlineKeyboardBuilder()
+        for i, t in enumerate(unique_titles(d)):
+            b.button(text=t, callback_data=f"as:{d.isoformat()}:{i}")
+        b.adjust(1)
+        await c.message.edit_text(head(d, "📝", "ДЗ на") + "\n\nПо какому предмету? 👇", reply_markup=b.as_markup())
+    except (ValueError, TelegramBadRequest):
+        pass
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("as:"))
+async def cb_hw_subject(c: CallbackQuery, state: FSMContext):
+    try:
+        _, ds, idx = c.data.split(":")
+        d = date.fromisoformat(ds)
+        title = unique_titles(d)[int(idx)]
+    except (ValueError, IndexError):
+        await c.answer()
+        return
+    await state.set_state(AddHW.text)
+    await state.update_data(key=f"{d.isoformat()}_{title}")
+    await c.message.edit_text(
+        f"📝 <b>{html.escape(title)}</b> · {d.day} {MONTHS[d.month - 1]}\n\n"
+        "Напиши текст задания одним сообщением.\nОтмена: /cancel"
+    )
+    await c.answer()
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(m: Message, state: FSMContext):
+    await state.clear()
+    await m.answer("Отменила ✅")
+
+
+@dp.message(AddHW.text, F.text, ~F.text.startswith("/"))
+async def got_hw(m: Message, state: FSMContext):
+    data = await state.get_data()
+    await state.clear()
+    shared = await save_hw(data["key"], m.text.strip()[:1000])
+    if shared:
+        await m.answer("Готово, ДЗ добавлено ✅ Посмотреть: /hw")
+    else:
+        await m.answer("Общая база ДЗ сейчас недоступна, поэтому сохранила только в боте ⚠️ "
+                       "В /hw оно будет видно, а на сайте нет")
 
 
 # ---------- вкл/выкл уведомлений и рассылки ----------
@@ -324,6 +465,7 @@ async def main():
         BotCommand(command="calls", description="Расписание звонков"),
         BotCommand(command="subject", description="Предметы и преподаватели"),
         BotCommand(command="hw", description="Домашние задания"),
+        BotCommand(command="addhw", description="Добавить ДЗ"),
         BotCommand(command="notify", description="Уведомления о парах вкл/выкл"),
         BotCommand(command="morning", description="Утренняя рассылка вкл/выкл"),
     ])
