@@ -24,6 +24,8 @@ MORNING_TIME = os.environ.get("MORNING_TIME", "07:30")
 HW_URL = os.environ.get("HW_URL", "https://api.npoint.io/ac41837c39a8785f2ce4")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+# id админов через запятую, например: ADMIN_IDS=123456789,987654321
+ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()}
 
 MOODLE = "https://moodle.uio.csu.ru/course/view.php?id="
 ANCHOR = date(2026, 9, 14)  # понедельник нечётной недели
@@ -39,7 +41,7 @@ MONTHS = ["января", "февраля", "марта", "апреля", "ма�
 BIRTHDAYS = [  # (день, месяц, имя)
     (1, 1, "Алина Шакирова"),
     (24, 1, "Алёна Боровикова"),
-    (7, 3, "Влад и Дима"),  
+    (7, 3, "Влад и Дима"),
     (12, 5, "Алина Карелина"),
     (11, 7, "Арина Анохина"),
     (4, 8, "Серёжа"),
@@ -491,6 +493,24 @@ async def send_bday_reminders(d: date, chats: dict):
                 await safe_send(cid, text)
 
 
+# ---------- рассылка объявлений (только для админов) ----------
+@dp.message(Command("send"))
+async def cmd_send(m: Message, command: CommandObject):
+    if m.from_user.id not in ADMIN_IDS:
+        return
+    text = (command.args or "").strip()
+    if not text:
+        await m.answer("Напиши текст после команды: /send Завтра пары отменили")
+        return
+    targets = set(load_settings().keys())
+    if GROUP_ID:
+        targets.add(str(GROUP_ID))
+    msg = "📢 <b>Объявление</b>\n\n" + html.escape(text)
+    for cid in targets:
+        await safe_send(cid, msg)
+    await m.answer(f"Отправлено в чатов: {len(targets)} ✅")
+
+
 # ---------- планировщик ----------
 async def safe_send(chat_id, text: str):
     try:
@@ -506,6 +526,9 @@ async def tick(now: datetime):
 
     if hhmm == MORNING_TIME:
         await send_bday_reminders(d, chats)  # работает и в дни без пар
+
+    if d.isoweekday() > 5:  # суббота и воскресенье: без уведомлений о парах
+        return
 
     pairs = pairs_on(d)
     if not pairs:
