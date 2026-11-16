@@ -143,7 +143,25 @@ async def cmd_start(m: Message):
 
 @dp.message(Command("id"))
 async def cmd_id(m: Message):
-    await m.answer(f"id этого чата: <code>{m.chat.id}</code>")
+    lines = [f"твой id: <code>{m.from_user.id}</code>",
+             f"id этого чата: <code>{m.chat.id}</code>"]
+    found = {}  # id -> имя
+    if m.reply_to_message and m.reply_to_message.from_user:
+        u = m.reply_to_message.from_user
+        found[u.id] = u.full_name
+    for ent in m.entities or []:
+        if ent.type == "text_mention" and ent.user:
+            found[ent.user.id] = ent.user.full_name
+        elif ent.type == "mention":
+            uname = ent.extract_from(m.text)
+            try:
+                ch = await bot.get_chat(uname)
+                found[ch.id] = ch.full_name or uname
+            except Exception:
+                lines.append(f"{html.escape(uname)}: не смогла найти 😭 Лучше ответь командой /id на его сообщение")
+    for uid, name in found.items():
+        lines.append(f"id {html.escape(name)}: <code>{uid}</code>")
+    await m.answer("\n".join(lines))
 
 
 @dp.message(Command("today"))
