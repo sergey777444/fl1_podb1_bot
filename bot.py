@@ -24,6 +24,7 @@ MORNING_TIME = os.environ.get("MORNING_TIME", "07:30")
 HW_URL = os.environ.get("HW_URL", "https://api.npoint.io/ac41837c39a8785f2ce4")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
 # id админов через запятую, например: ADMIN_IDS=123456789,987654321
 ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "").split(",") if x.strip()}
 
@@ -82,6 +83,34 @@ class Access(BaseMiddleware):
 
 dp.message.outer_middleware(Access())
 dp.callback_query.outer_middleware(Access())
+
+
+# ---------- запоминаем тех, кто писал боту в лс (им можно слать /send) ----------
+def load_users() -> list:
+    try:
+        with open(USERS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return []
+
+
+def save_users(users: list) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(users, f)
+
+
+class Track(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        if event.chat.type == "private" and event.from_user and not event.from_user.is_bot:
+            users = load_users()
+            if event.from_user.id not in users:
+                users.append(event.from_user.id)
+                save_users(users)
+        return await handler(event, data)
+
+
+dp.message.outer_middleware(Track())
 
 
 # ---------- расписание ----------
@@ -520,13 +549,20 @@ async def cmd_send(m: Message, command: CommandObject):
     if not text:
         await m.answer("Напиши текст после команды: /send Завтра пары отменили")
         return
-    targets = set(load_settings().keys())
+    targets = {str(u) for u in load_users()}
+    targets |= set(load_settings().keys())
     if GROUP_ID:
         targets.add(str(GROUP_ID))
     msg = "📢 <b>Объявление</b>\n\n" + html.escape(text)
+    ok = 0
     for cid in targets:
-        await safe_send(cid, msg)
-    await m.answer(f"Отправлено в чатов: {len(targets)} ✅")
+        try:
+            await bot.send_message(int(cid), msg)
+            ok += 1
+        except Exception as e:
+            print("send error:", cid, e)
+        await asyncio.sleep(0.05)  # чтобы не упереться в лимиты Telegram
+    await m.answer(f"Отправлено: {ok} из {len(targets)} ✅")
 
 
 # ---------- планировщик ----------
